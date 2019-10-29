@@ -92,10 +92,6 @@ static void mount_mirrors() {
             link_orig(metadata)
             link_orig(persist)
             link_orig_dir("/mnt/vendor/persist", persist)
-            if (SDK_INT >= 24 && MNT_DIR_IS("/proc") && !strstr(me->mnt_opts, "hidepid=2")) {
-                xmount(nullptr, "/proc", nullptr, MS_REMOUNT, "hidepid=2,gid=3009");
-                break;
-            }
         } while (false);
         return true;
     });
