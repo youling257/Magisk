@@ -98,9 +98,6 @@ static bool magisk_env() {
 		mount_mirror(product, MS_RDONLY)
 		mount_mirror(system_ext, MS_RDONLY)
 		mount_mirror(data, 0)
-		else if (SDK_INT >= 24 && DIR_IS(proc) && !strstr(me->mnt_opts, "hidepid=2")) {
-			xmount(nullptr, "/proc", nullptr, MS_REMOUNT, "hidepid=2,gid=3009");
-		}
 		return true;
 	});
 	SETMIR(buf1, system);
