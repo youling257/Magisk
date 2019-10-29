@@ -78,9 +78,6 @@ bool MagiskInit::hijack_sepolicy() {
             return false;
         }
 
-        // Remount procfs with proper options
-        xmount(nullptr, "/proc", nullptr, MS_REMOUNT, "hidepid=2,gid=3009");
-
         LOGD("Hijack [%s]\n", buf);
 
         // Preserve sysfs and procfs for hijacking
