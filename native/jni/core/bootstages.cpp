@@ -93,10 +93,10 @@ static bool magisk_env() {
 	parse_mnt("/proc/mounts", [&](mntent *me) {
 		struct stat st;
 		if (0) {}
-		mount_mirror(system, MS_RDONLY)
-		mount_mirror(vendor, MS_RDONLY)
-		mount_mirror(product, MS_RDONLY)
-		mount_mirror(system_ext, MS_RDONLY)
+		mount_mirror(system, MS_RDONLY | MS_NOATIME)
+		mount_mirror(vendor, MS_RDONLY | MS_NOATIME)
+		mount_mirror(product, MS_RDONLY | MS_NOATIME)
+		mount_mirror(system_ext, MS_RDONLY | MS_NOATIME)
 		mount_mirror(data, 0)
 		return true;
 	});
