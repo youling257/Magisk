@@ -39,7 +39,11 @@ bool zygisk_enabled = false;
     auto opts = split_ro(me->mnt_opts, ",");\
     for (string_view s : opts) {    \
         if (s == "ro") {            \
-            flags |= MS_RDONLY;     \
+            flags |= MS_RDONLY | MS_NOATIME;     \
+            break;                  \
+        }                           \
+        else {            \
+            flags |= MS_NOATIME;     \
             break;                  \
         }                           \
     }                               \
