@@ -362,16 +362,16 @@ static bool magisk_env() {
 	struct stat st;
 	parse_mnt("/proc/mounts", [&](mntent *me) {
 		if (DIR_IS(system_root)) {
-			mount_mirror(system_root, MS_RDONLY);
+			mount_mirror(system_root, MS_RDONLY | MS_NOATIME);
 			xsymlink("./system_root/system", MIRRMNT(system));
 			VLOGI("link", MIRRMNT(system_root) "/system", MIRRMNT(system));
 			system_as_root = true;
 		} else if (!system_as_root && DIR_IS(system)) {
-			mount_mirror(system, MS_RDONLY);
+			mount_mirror(system, MS_RDONLY | MS_NOATIME);
 		} else if (DIR_IS(vendor)) {
-			mount_mirror(vendor, MS_RDONLY);
+			mount_mirror(vendor, MS_RDONLY | MS_NOATIME);
 		} else if (DIR_IS(product)) {
-			mount_mirror(product, MS_RDONLY);
+			mount_mirror(product, MS_RDONLY | MS_NOATIME);
 		} else if (DIR_IS(data) && me->mnt_type != "tmpfs"sv) {
 			mount_mirror(data, 0);
 		}
