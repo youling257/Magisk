@@ -12,13 +12,13 @@ using namespace std;
 
 #define VLOGI(tag, from, to) LOGI("%-8s: %s <- %s\n", tag, to, from)
 
-#define TYPE_MIRROR  (1 << 0)    /* mount from mirror */
-#define TYPE_INTER   (1 << 1)    /* intermediate node */
+#define TYPE_INTER   (1 << 0)    /* intermediate node */
+#define TYPE_MIRROR  (1 << 1)    /* mount from mirror */
 #define TYPE_SKEL    (1 << 2)    /* replace with tmpfs */
 #define TYPE_MODULE  (1 << 3)    /* mount from module */
 #define TYPE_ROOT    (1 << 4)    /* partition root */
 #define TYPE_CUSTOM  (1 << 5)    /* custom node type overrides all */
-#define TYPE_DIR     (TYPE_INTER|TYPE_SKEL|TYPE_ROOT)
+#define TYPE_DIR     (TYPE_INTER|TYPE_MIRROR|TYPE_SKEL|TYPE_ROOT)
 
 static vector<string> module_list;
 
@@ -81,14 +81,14 @@ protected:
 
 	/* Use top bit of _file_type for node exist status */
 	bool exist() { return static_cast<bool>(_file_type & (1 << 7)); }
-	void set_exist(bool b) { if (b) _file_type |= (1 << 7); else _file_type &= ~(1 << 7); }
+	void set_exist() { _file_type |= (1 << 7); }
 	uint8_t file_type() { return static_cast<uint8_t>(_file_type & ~(1 << 7)); }
 
 private:
 	friend void merge_node(node_entry *a, node_entry *b);
 	friend class dir_node;
 
-	bool need_skel_upgrade(node_entry *child);
+	bool need_clone();
 
 	// Node properties
 	string _name;
@@ -108,11 +108,7 @@ public:
 	typedef map<string_view, node_entry *> map_type;
 	typedef map_type::iterator map_iter;
 
-	~dir_node() override {
-		for (auto &it : children)
-			delete it.second;
-		children.clear();
-	}
+	~dir_node() override;
 
 	// Return false to indicate need to upgrade to module
 	bool collect_files(const char *module, int dfd);
@@ -190,6 +186,13 @@ protected:
 	template<class T>
 	dir_node(const char *name, T *self) : dir_node(name, DT_DIR, self) {}
 
+private:
+	// Root node lookup cache
+	root_node *_root;
+
+	// dir nodes host children
+	map_type children;
+
 	template<class T = node_entry>
 	T *iter_to_node(const map_iter &it) {
 		return reinterpret_cast<T*>(it == children.end() ? nullptr : it->second);
@@ -218,12 +221,6 @@ protected:
 			return node;
 		});
 	}
-
-	// dir nodes host children
-	map_type children;
-
-	// Root node lookup cache
-	root_node *_root;
 };
 
 class root_node : public dir_node {
@@ -241,6 +238,22 @@ private:
 	friend class module_node;
 };
 
+void node_entry::create_and_mount(const string &src) {
+	const string &dest = node_path();
+	if (is_lnk()) {
+		VLOGI("cp_link", src.data(), dest.data());
+		cp_afc(src.data(), dest.data());
+	} else {
+		if (is_dir())
+			xmkdir(dest.data(), 0);
+		else if (is_reg())
+			close(xopen(dest.data(), O_RDONLY | O_CREAT | O_CLOEXEC, 0));
+		else
+			return;
+		bind_mount(src.data(), dest.data());
+	}
+}
+
 class module_node : public node_entry {
 public:
 	module_node(const char *module, dirent *entry)
@@ -252,23 +265,45 @@ public:
 
 	module_node(inter_node *node) : module_node(node, node->module) {}
 
-	void mount() override;
+	void mount() override {
+		string src = module_mnt + module + parent()->root()->prefix + node_path();
+		if (exist())
+			clone_attr(mirror_path().data(), src.data());
+		if (isa<skel_node>(parent()))
+			create_and_mount(src);
+		else if (is_dir() || is_reg())
+			bind_mount(src.data(), node_path().data());
+	}
+
 private:
 	const char *module;
 };
 
-class mirror_node : public node_entry {
+class mirror_node : public dir_node {
 public:
-	mirror_node(dirent *entry) : node_entry(entry->d_name, entry->d_type, this) {}
+	mirror_node(dirent *entry) : dir_node(entry->d_name, entry->d_type, this) {}
+
 	void mount() override {
 		create_and_mount(mirror_path());
+		dir_node::mount();
 	}
 };
 
 class skel_node : public dir_node {
 public:
-	skel_node(node_entry *node);
-	void mount() override;
+	skel_node(node_entry *node) : dir_node(node, this) {}
+
+	void mount() override {
+		string src = mirror_path();
+		const string &dest = node_path();
+		file_attr a;
+		getattr(src.data(), &a);
+		mkdir(dest.data(), 0);
+		xmount("tmpfs", dest.data(), "tmpfs", 0, nullptr);
+		VLOGI("mnt_tmp", "tmpfs", dest.data());
+		setattr(dest.data(), &a);
+		dir_node::mount();
+	}
 };
 
 // Poor man's dynamic cast without RTTI
@@ -307,9 +342,11 @@ const string &node_entry::node_path() {
 	return _node_path;
 }
 
-/*************************
- * Node Tree Construction
- *************************/
+dir_node::~dir_node() {
+	for (auto &it : children)
+		delete it.second;
+	children.clear();
+}
 
 template<typename Func>
 dir_node::map_iter dir_node::insert(dir_node::map_iter it, uint8_t type, Func fn, bool allow_same) {
@@ -353,71 +390,66 @@ node_entry* dir_node::extract(string_view name) {
 	return nullptr;
 }
 
-skel_node::skel_node(node_entry *node) : dir_node(node, this) {
-	string mirror = mirror_path();
-	if (auto dir = open_dir(mirror.data()); dir) {
-		set_exist(true);
-		for (dirent *entry; (entry = xreaddir(dir.get()));) {
-			// Insert mirror nodes
-			emplace<mirror_node>(entry->d_name, entry);
-		}
-	} else {
-		// It is actually possible that mirror does not exist (nested mount points)
-		// Set self to non exist so this node will be ignored at mount
-		set_exist(false);
-		return;
-	}
-
-	for (auto it = children.begin(); it != children.end(); ++it) {
-		// Need to upgrade all inter_node children to skel_node
-		if (isa<inter_node>(it->second))
-			it = upgrade<skel_node>(it);
-	}
-}
-
-bool node_entry::need_skel_upgrade(node_entry *child) {
-	/* We need to upgrade to skeleton if:
+bool node_entry::need_clone() {
+	/* We need to upgrade parent to skeleton if:
 	 * - Target does not exist
 	 * - Source or target is a symlink */
-	bool upgrade = false;
+	bool clone = false;
 	struct stat st;
-	if (lstat(child->node_path().data(), &st) != 0) {
-		upgrade = true;
+	if (lstat(node_path().data(), &st) != 0) {
+		clone = true;
 	} else {
-		child->set_exist(true);
-		if (child->is_lnk() || S_ISLNK(st.st_mode))
-			upgrade = true;
+		set_exist();  // cache exist result
+		if (is_lnk() || S_ISLNK(st.st_mode))
+			clone = true;
 	}
-	return upgrade;
+	return clone;
 }
 
 bool dir_node::prepare() {
-	bool to_skel = false;
+	bool upgrade_skel = false;
 	for (auto it = children.begin(); it != children.end();) {
-		if (need_skel_upgrade(it->second)) {
+		auto child = it->second;
+		if (child->need_clone()) {
 			if (node_type > type_id<skel_node>()) {
-				// Upgrade will fail, remove the unsupported child node
-				delete it->second;
-				it = children.erase(it);
-				continue;
+				// Upgrade will fail
+				goto delete_node;
 			}
 			// Tell parent to upgrade self to skel
-			to_skel = true;
+			upgrade_skel = true;
 			// If child is inter_node, upgrade to module
 			if (auto nit = upgrade<module_node, inter_node>(it); nit != children.end()) {
 				it = nit;
 				goto next_node;
 			}
 		}
-		if (auto dn = dyn_cast<dir_node>(it->second); dn && dn->is_dir() && !dn->prepare()) {
-			// Upgrade child to skeleton
+		if (auto dn = dyn_cast<dir_node>(child); dn && dn->is_dir() && !dn->prepare()) {
+			string mirror = dn->mirror_path();
+			if (access(mirror.data(), F_OK) != 0) {
+				// It is actually possible that mirror does not exist
+				goto delete_node;
+			}
+
+			// Upgrade child to skeleton (shall always success)
 			it = upgrade<skel_node>(it);
+			auto skel = iter_to_node<skel_node>(it);
+			auto dir = xopen_dir(mirror.data());
+			for (dirent *entry; (entry = xreaddir(dir.get()));) {
+				// Insert mirror nodes
+				skel->emplace<mirror_node>(entry->d_name, entry);
+			}
 		}
 next_node:
 		++it;
 		continue;
+
+delete_node:
+		// Remove the unsupported child node
+		delete it->second;
+		it = children.erase(it);
+		continue;
 	}
-	return !to_skel;
+	return !upgrade_skel;
 }
 
 bool dir_node::collect_files(const char *module, int dfd) {
@@ -444,57 +476,6 @@ bool dir_node::collect_files(const char *module, int dfd) {
 	}
 	return true;
 }
-
-/************************
- * Mount Implementations
- ************************/
-
-void node_entry::create_and_mount(const string &src) {
-	const string &dest = node_path();
-	if (is_lnk()) {
-		VLOGI("cp_link", src.data(), dest.data());
-		cp_afc(src.data(), dest.data());
-	} else {
-		if (is_dir())
-			xmkdir(dest.data(), 0);
-		else if (is_reg())
-			close(xopen(dest.data(), O_RDONLY | O_CREAT | O_CLOEXEC, 0));
-		else
-			return;
-		bind_mount(src.data(), dest.data());
-	}
-}
-
-void module_node::mount() {
-	string src = module_mnt + module + parent()->root()->prefix + node_path();
-	if (exist())
-		clone_attr(mirror_path().data(), src.data());
-	if (isa<skel_node>(parent()))
-		create_and_mount(src);
-	else if (is_dir() || is_reg())
-		bind_mount(src.data(), node_path().data());
-}
-
-void skel_node::mount() {
-	if (!exist())
-		return;
-	string src = mirror_path();
-	const string &dest = node_path();
-	file_attr a;
-	getattr(src.data(), &a);
-	mkdir(dest.data(), 0);
-	if (!isa<skel_node>(parent())) {
-		// We don't need another layer of tmpfs if parent is skel
-		xmount("tmpfs", dest.data(), "tmpfs", 0, nullptr);
-		VLOGI("mnt_tmp", "tmpfs", dest.data());
-	}
-	setattr(dest.data(), &a);
-	dir_node::mount();
-}
-
-/****************
- * Magisk Stuffs
- ****************/
 
 class magisk_node : public node_entry {
 public:
