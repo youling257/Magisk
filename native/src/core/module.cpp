@@ -35,13 +35,8 @@ tmpfs_node::tmpfs_node(node_entry *node) : dir_node(node, this) {
         if (auto dir = open_dir(mirror.data())) {
             set_exist(true);
             for (dirent *entry; (entry = xreaddir(dir.get()));) {
-                if (entry->d_type == DT_DIR) {
-                    // create a dummy inter_node to upgrade later
-                    emplace<inter_node>(entry->d_name, entry->d_name);
-                } else {
                     // Insert mirror nodes
                     emplace<mirror_node>(entry->d_name, entry);
-                }
             }
         }
     }
@@ -94,31 +89,35 @@ bool dir_node::prepare() {
     return upgrade_to_tmpfs;
 }
 
-void dir_node::collect_module_files(const char *module, int dfd) {
+bool dir_node::collect_module_files(const char *module, int dfd) {
     auto dir = xopen_dir(xopenat(dfd, name().data(), O_RDONLY | O_CLOEXEC));
     if (!dir)
-        return;
+        return true;
 
     for (dirent *entry; (entry = xreaddir(dir.get()));) {
         if (entry->d_name == ".replace"sv) {
-            set_skip_mirror(true);
-            continue;
+            // Stop traversing and tell parent to upgrade self to module
+            return false;
         }
 
         if (entry->d_type == DT_DIR) {
-            inter_node *node;
+            dir_node *node;
             if (auto it = children.find(entry->d_name); it == children.end()) {
                 node = emplace<inter_node>(entry->d_name, entry->d_name);
             } else {
                 node = dyn_cast<inter_node>(it->second);
+                // it has been accessed by at least two modules, it must be guarantee to exist
+                // set it so that it won't be upgrade to module_node but tmpfs_node
+                if (node) node->set_exist(true);
             }
-            if (node) {
-                node->collect_module_files(module, dirfd(dir.get()));
+            if (node && !node->collect_module_files(module, dirfd(dir.get()))) {
+                upgrade<module_node>(node->name(), module);
             }
         } else {
             emplace<module_node>(entry->d_name, module, entry);
         }
     }
+    return true;
 }
 
 /************************

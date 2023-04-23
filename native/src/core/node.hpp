@@ -108,7 +108,7 @@ public:
      **************/
 
     // Traverse through module directories to generate a tree of module files
-    void collect_module_files(const char *module, int dfd);
+    bool collect_module_files(const char *module, int dfd);
 
     // Traverse through the real filesystem and prepare the tree for magic mount.
     // Return true to indicate that this node needs to be upgraded to tmpfs_node.
